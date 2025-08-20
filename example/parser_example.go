@@ -17,6 +17,7 @@ type Other struct {
 }
 type Temp struct {
 	TempStr **string `json:"temp_str"`
+	TmpStr  *string
 	NoneTag string
 	Gender  string
 	XmlTag  string `xml:"tag,attr"`

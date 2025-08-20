@@ -35,6 +35,7 @@ type FieldInfo struct {
 	AccessPath string // 字段访问路径 (e.g. "Other.Money")
 	IsPtr      bool
 	Tag        string
+	Type       string // 字段类型字符串表示
 }
 
 func NewGenerator(config Config) *Generator {
@@ -126,6 +127,9 @@ func (g *Generator) processFieldBasic(field *ast.Field, info *StructInfo, prefix
 		isPtr = true
 	}
 
+	// 获取类型字符串
+	typeStr := g.exprToString(field.Type)
+
 	// 处理匿名字段（只记录类型名，稍后解析）
 	if ident, ok := fieldType.(*ast.Ident); ok && len(field.Names) == 0 {
 		// 添加一个标记字段，表示这是一个匿名字段
@@ -134,6 +138,7 @@ func (g *Generator) processFieldBasic(field *ast.Field, info *StructInfo, prefix
 			AccessPath: ident.Name, // 匿名字段的访问路径就是类型名
 			IsPtr:      isPtr,
 			Tag:        "**EMBEDDED**", // 特殊标记表示这是匿名字段
+			Type:       typeStr,
 		})
 		return
 	}
@@ -159,7 +164,34 @@ func (g *Generator) processFieldBasic(field *ast.Field, info *StructInfo, prefix
 			AccessPath: accessPath,
 			IsPtr:      isPtr,
 			Tag:        tag,
+			Type:       typeStr,
 		})
+	}
+}
+
+// exprToString 将AST表达式转换为字符串表示
+func (g *Generator) exprToString(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.StarExpr:
+		return "*" + g.exprToString(t.X)
+	case *ast.ArrayType:
+		if t.Len == nil {
+			return "[]" + g.exprToString(t.Elt)
+		}
+		return "[" + g.exprToString(t.Len) + "]" + g.exprToString(t.Elt)
+	case *ast.SelectorExpr:
+		return g.exprToString(t.X) + "." + t.Sel.Name
+	case *ast.MapType:
+		return "map[" + g.exprToString(t.Key) + "]" + g.exprToString(t.Value)
+	case *ast.InterfaceType:
+		return "interface{}"
+	case *ast.BasicLit:
+		return t.Value
+	default:
+		// 对于复杂类型，返回一个通用表示
+		return "any"
 	}
 }
 
@@ -189,6 +221,7 @@ func (g *Generator) resolveEmbeddedFields(info *StructInfo) {
 					AccessPath: field.AccessPath + "." + embeddedField.AccessPath,
 					IsPtr:      embeddedField.IsPtr,
 					Tag:        embeddedField.Tag,
+					Type:       embeddedField.Type,
 				}
 				embeddedFields = append(embeddedFields, newField)
 			}
@@ -247,8 +280,9 @@ func (g *Generator) generateFile(filename string) error {
 				continue
 			}
 
-			// 生成At方法
-			outputContent.WriteString(g.generateAtMethod(structInfo))
+			// 生成ReadAt和WriteAt方法
+			outputContent.WriteString(g.generateReadAtMethod(structInfo))
+			outputContent.WriteString(g.generateWriteAtMethod(structInfo))
 		}
 		return true
 	})
@@ -262,7 +296,7 @@ func (g *Generator) generateFile(filename string) error {
 	return os.WriteFile(outputFile, []byte(outputContent.String()), 0644)
 }
 
-func (g *Generator) generateAtMethod(info *StructInfo) string {
+func (g *Generator) generateReadAtMethod(info *StructInfo) string {
 	// 使用map来记录key的使用情况，避免重复
 	keyToField := make(map[string]FieldInfo)
 	duplicateWarnings := make([]string, 0)
@@ -302,16 +336,121 @@ func (g *Generator) generateAtMethod(info *StructInfo) string {
 	// 生成case语句
 	var cases strings.Builder
 	for key, field := range keyToField {
-		returnExpr := "&t." + field.AccessPath
+		returnExpr := "t." + field.AccessPath
 
 		cases.WriteString(fmt.Sprintf("\tcase %q:\n\t\treturn %s, true\n", key, returnExpr))
 	}
 
 	const methodTmpl = `
-func (t *{{.Name}}) At(key string) (val any, ok bool) {
+func (t *{{.Name}}) ReadAt(key string) (val any, ok bool) {
 	switch key {
 {{.Cases}}	default:
 		return nil, false
+	}
+}
+`
+
+	tmpl, err := template.New("method").Parse(methodTmpl)
+	if err != nil {
+		log.Fatalf("Error parsing template: %v", err)
+	}
+
+	var result strings.Builder
+	data := struct {
+		Name  string
+		Cases string
+	}{
+		Name:  info.Name,
+		Cases: cases.String(),
+	}
+
+	if err := tmpl.Execute(&result, data); err != nil {
+		log.Fatalf("Error executing template: %v", err)
+	}
+
+	return result.String()
+}
+
+func (g *Generator) generateWriteAtMethod(info *StructInfo) string {
+	// 使用map来记录key的使用情况，避免重复
+	keyToField := make(map[string]FieldInfo)
+	duplicateWarnings := make([]string, 0)
+
+	// 遍历所有字段，收集key映射关系
+	for _, field := range info.Fields {
+		if field.Tag == "**EMBEDDED**" {
+			continue // 跳过未解析的匿名字段标记
+		}
+
+		key := strings.ToLower(field.Name)
+		if g.config.TagType != "" && field.Tag != "" {
+			// 处理标签中的逗号分隔选项（如 `json:"name,omitempty"`）
+			tagValue := strings.Split(field.Tag, ",")[0]
+			if tagValue != "" && tagValue != "-" {
+				key = tagValue
+			}
+		}
+
+		// 检查key是否已经存在
+		if existingField, exists := keyToField[key]; exists {
+			// 记录警告信息
+			warning := fmt.Sprintf("\033[33mWARNING\033[0m: Key %q is duplicated.  Field %q (path: %s) ==> %q (path: %s)",
+				key, field.Name, field.AccessPath, existingField.Name, existingField.AccessPath)
+			duplicateWarnings = append(duplicateWarnings, warning)
+		}
+
+		// 使用最后遇到的字段（覆盖之前的）
+		keyToField[key] = field
+	}
+
+	// 输出警告信息
+	for _, warning := range duplicateWarnings {
+		fmt.Fprintf(os.Stderr, "%s\n", warning)
+	}
+
+	// 生成case语句
+	var cases strings.Builder
+	for key, field := range keyToField {
+		assignmentExpr := "t." + field.AccessPath
+		baseType := field.Type
+
+		// 处理指针类型
+		if after, ok := strings.CutPrefix(baseType, "*"); ok {
+			// 对于指针类型，我们需要检查传入的值是否是指针类型或基础类型
+			baseTypeWithoutPtr := after
+
+			cases.WriteString(fmt.Sprintf("\tcase %q:\n", key))
+			cases.WriteString("\t\tswitch v := value.(type) {\n")
+
+			// 情况1：传入的值是指针类型
+			cases.WriteString(fmt.Sprintf("\t\tcase %s:\n", field.Type))
+			cases.WriteString(fmt.Sprintf("\t\t\t%s = v\n", assignmentExpr))
+			cases.WriteString("\t\t\treturn true\n")
+
+			// 情况2：传入的值是基础类型
+			cases.WriteString(fmt.Sprintf("\t\tcase %s:\n", baseTypeWithoutPtr))
+			cases.WriteString(fmt.Sprintf("\t\t\t%s = &v\n", assignmentExpr))
+			cases.WriteString("\t\t\treturn true\n")
+
+			cases.WriteString("\t\tdefault:\n")
+			cases.WriteString("\t\t\treturn false\n")
+			cases.WriteString("\t\t}\n")
+		} else {
+			// 对于非指针类型，直接检查类型
+			cases.WriteString(fmt.Sprintf("\tcase %q:\n", key))
+			cases.WriteString(fmt.Sprintf("\t\tif v, ok := value.(%s); ok {\n", field.Type))
+			cases.WriteString(fmt.Sprintf("\t\t\t%s = v\n", assignmentExpr))
+			cases.WriteString("\t\t\treturn true\n")
+			cases.WriteString("\t\t}\n")
+			cases.WriteString("\t\treturn false\n")
+		}
+	}
+
+	const methodTmpl = `
+func (t *{{.Name}}) WriteAt(key string, value any) (ok bool) {
+	switch key {
+{{.Cases}}	default:
+		return false
 	}
 }
 `
