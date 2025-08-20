@@ -171,24 +171,26 @@ func (g *Generator) resolveEmbeddedFields(info *StructInfo) {
 	for _, field := range info.Fields {
 		if field.Tag == "**EMBEDDED**" {
 			// 这是一个匿名字段，需要展开
-			if embeddedStruct, exists := g.structs[field.Name]; exists {
-				// 确保嵌入的结构体也已经解析了其匿名字段
-				g.resolveEmbeddedFields(embeddedStruct)
+			embeddedStruct, exists := g.structs[field.Name]
+			if !exists {
+				continue
+			}
+			// 确保嵌入的结构体也已经解析了其匿名字段
+			g.resolveEmbeddedFields(embeddedStruct)
 
-				// 添加嵌入结构体的所有字段
-				for _, embeddedField := range embeddedStruct.Fields {
-					if embeddedField.Tag == "**EMBEDDED**" {
-						continue // 跳过未解析的匿名字段
-					}
-
-					newField := FieldInfo{
-						Name:       embeddedField.Name,
-						AccessPath: field.AccessPath + "." + embeddedField.AccessPath,
-						IsPtr:      embeddedField.IsPtr,
-						Tag:        embeddedField.Tag,
-					}
-					embeddedFields = append(embeddedFields, newField)
+			// 添加嵌入结构体的所有字段
+			for _, embeddedField := range embeddedStruct.Fields {
+				if embeddedField.Tag == "**EMBEDDED**" {
+					continue // 跳过未解析的匿名字段
 				}
+
+				newField := FieldInfo{
+					Name:       embeddedField.Name,
+					AccessPath: field.AccessPath + "." + embeddedField.AccessPath,
+					IsPtr:      embeddedField.IsPtr,
+					Tag:        embeddedField.Tag,
+				}
+				embeddedFields = append(embeddedFields, newField)
 			}
 		} else {
 			// 普通字段，直接添加
@@ -302,18 +304,14 @@ func (g *Generator) generateAtMethod(info *StructInfo) string {
 	for key, field := range keyToField {
 		returnExpr := "&t." + field.AccessPath
 
-		cases.WriteString(fmt.Sprintf(
-			"\tcase %q:\n\t\treturn %s\n",
-			key,
-			returnExpr,
-		))
+		cases.WriteString(fmt.Sprintf("\tcase %q:\n\t\treturn %s, true\n", key, returnExpr))
 	}
 
 	const methodTmpl = `
-func (t *{{.Name}}) At(key string) any {
+func (t *{{.Name}}) At(key string) (val any, ok bool) {
 	switch key {
 {{.Cases}}	default:
-		return nil
+		return nil, false
 	}
 }
 `
