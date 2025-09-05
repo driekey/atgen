@@ -1,6 +1,6 @@
 package example
 
-//go:generate atgen -type=json
+//go:generate atgen -key=json -type=Target -output=target_at.gen.go
 type Target struct {
 	Name string `json:"name"`
 	Age  int    `json:"age"`
@@ -9,6 +9,8 @@ type Target struct {
 	Other
 	Temp
 	Sex string `json:"gender"`
+
+	MapString map[string]string `json:"map_string"`
 }
 
 type Other struct {
