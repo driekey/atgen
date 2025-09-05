@@ -1,19 +1,72 @@
-# atgen - Go 代码生成工具
+# atgen - Go Code Generation Tool
 
-`atgen` 是一个为结构体生成读写访问方法的 Go 代码生成工具。
+> For Chinese documentation, see [README.zh-CN.md](README.zh-CN.md)
 
-## 功能
-- 为带有 `//go:generate atgen -key=json -type=Obj -output=obj_at.gen.go` 标记的结构体生成方法：
-  - `func (t* Obj) At(key string, visit func(val any) any)`
-- 支持通过字段名或标签映射访问字段
-- 正确处理嵌套结构体和匿名字段
-- 自动处理指针类型，支持基础类型到指针类型的自动转换
-- 类型安全检查，确保写入值的类型与字段类型匹配
+`atgen` is a Go code generation tool that generates field access methods for structs, specifically designed to handle read/write operations for pure data structures.
 
-> 目前是用来给定义纯数据结构体而使用的, 对于存在的特殊类型如 func, chan 可能不适配
 
-## 安装
+## Features
+- Generates the following method for structs marked with `//go:generate atgen -key=json -type=Obj -output=obj_at.gen.go`:
+  - `func (t* Obj) At(key string, visit func(val any) any) error`
+- Supports field access via field names or tag mappings
+- Properly handles nested structs and anonymous fields
+- Ensures type safety by validating that the assigned value matches the field type
+- Provides clear error messages when fields are not found or type mismatches occur
+
+
+## Key Characteristics
+- **Type Safety**: Automatically performs type checks to prevent incompatible assignments
+- **Error Handling**: Returns detailed error messages for missing fields or failed type assertions
+- **Nil Handling Strategy**: Does not update fields when the `visit` function returns `nil` (use dedicated methods for explicit `nil` assignment)
+- **Tag Support**: Enables field access via tags such as JSON, YAML, and XML
+- **Embedding Support**: Correctly processes nested structs and anonymous fields
+
+> Note: Currently optimized for pure data structs; may not be fully compatible with special types like `func` or `chan`.
+
+
+## Installation
 
 ```bash
 go install github.com/driekey/atgen@latest
 ```
+
+
+## Usage
+
+1. Add a `go:generate` directive to your struct definition file:
+```go
+//go:generate atgen -type=YourStruct -key=json -output=your_struct_at.gen.go
+```
+
+2. Run code generation:
+```bash
+go generate ./...
+```
+
+3. Use the generated `At` method:
+```go
+obj := &YourStruct{Name: "test", Age: 30}
+
+// Update field value
+err := obj.At("name", func(val any) any {
+    return strings.ToUpper(val.(string))
+})
+
+// Handle errors
+if err != nil {
+    log.Printf("update failed: %v", err)
+}
+```
+
+
+## Error Handling
+
+The `At` method may return the following errors:
+- `field not found: <key>` - Returned when the specified field does not exist
+- `type assertion failed for field <key>: expected <type>, got <actual type>` - Returned when a type assertion fails
+
+
+## Notes
+- Use dedicated methods to explicitly set fields to `nil` (since `nil` is used as an indicator for "no update")
+- Generated code includes protective comments to prevent overwriting manual edits
+- Supports cross-package type references, but ensure dependent packages are properly imported

@@ -206,14 +206,30 @@ func (gen *Generator) findStructByName(typeName string) (*ast.StructType, error)
 	return nil, fmt.Errorf("struct %s not found in package %s", typeName, gen.pkg.Name)
 }
 
+func (gen *Generator) generateAtMethodComment() *jen.Statement {
+	return jen.Comment("At updates a field in " + gen.typeName + " by key using a visit callback function.").Line().
+		Comment("").Line().
+		Comment("Parameters:").Line().
+		Comment("  - key: field identifier (either tag value or lowercase field name)").Line().
+		Comment("  - visit: callback function that receives the current field value and returns a new value").Line().
+		Comment("").Line().
+		Comment("Returns:").Line().
+		Comment("  - error: if the field is not found or if the new value has an incompatible type").Line().
+		Comment("").Line().
+		Comment("Note:").Line().
+		Comment("  - If the visit function returns nil, no assignment is performed.").Line().
+		Comment("  - To explicitly set a field to nil, use a different approach as nil is used").Line().
+		Comment("    to indicate that no update should be performed.").Line().
+		Comment("  - The method performs type checking to ensure type safety when assigning new values.").Line()
+}
+
 func (gen *Generator) generateAtMethod(structType *ast.StructType, embeddedStructs []*ast.StructType) (*jen.Statement, error) {
-	method := jen.
-		Comment(
-			fmt.Sprintf("At updates %s field by key via visit callback", gen.typeName),
-		).
-		Line().
-		Comment("key: field key (tag or lowercase name), visit: processes current value and returns new value").
-		Line().
+	// Add required imports
+	if _, exists := gen.imports["fmt"]; !exists {
+		gen.imports["fmt"] = "fmt"
+	}
+
+	method := gen.generateAtMethodComment().
 		Func().
 		Params(jen.Id("s").Op("*").Id(gen.typeName)).
 		Id("At").
@@ -221,6 +237,7 @@ func (gen *Generator) generateAtMethod(structType *ast.StructType, embeddedStruc
 			jen.Id("key").String(),
 			jen.Id("visit").Func().Params(jen.Id("val").Any()).Any(),
 		).
+		Error().
 		Block(
 			jen.Switch(jen.Id("key")).BlockFunc(func(group *jen.Group) {
 				processedKeys := make(map[string]bool)
@@ -231,8 +248,11 @@ func (gen *Generator) generateAtMethod(structType *ast.StructType, embeddedStruc
 				for _, embeddedStruct := range embeddedStructs {
 					gen.processStructFields(group, embeddedStruct, "s", processedKeys)
 				}
-				group.Default().Block(jen.Id("visit").Call(jen.Nil()))
+				group.Default().Block(
+					jen.Return(jen.Qual("fmt", "Errorf").Call(jen.Lit("field not found: %s"), jen.Id("key"))),
+				)
 			}),
+			jen.Return(jen.Nil()),
 		)
 
 	return method, nil
@@ -273,10 +293,7 @@ func (gen *Generator) processField(group *jen.Group, field *ast.Field, receiver 
 	// 3) emit switch case
 	group.Case(jen.Lit(key))
 
-	// 4) call visit with current field value
-	group.Id("visitResult").Op(":=").Id("visit").Call(jen.Id(receiver).Dot(fieldName))
-
-	// 5) add assignment/type-assert logic
+	// 4) add assignment/type-assert logic
 	gen.addAssignmentBlock(group, fieldName, fieldTypeNode, fieldTypeStr, receiver)
 }
 
@@ -292,20 +309,29 @@ func (gen *Generator) renderFieldType(stmt *jen.Statement) string {
 
 // addAssignmentBlock generates type-check and assignment logic depending on field type
 func (gen *Generator) addAssignmentBlock(group *jen.Group, fieldName string, fieldTypeNode *jen.Statement, fieldTypeStr string, receiver string) {
-	group.If(jen.Id("visitResult").Op("!=").Nil()).BlockFunc(func(ifGroup *jen.Group) {
+	group.If(
+		jen.Id("visitResult").Op(":=").Id("visit").Call(jen.Id(receiver).Dot(fieldName)),
+		jen.Id("visitResult").Op("!=").Nil()).BlockFunc(func(ifGroup *jen.Group,
+	) {
 		// if field is interface{} or any, assign directly
 		if fieldTypeStr == "interface{}" || fieldTypeStr == "any" {
 			ifGroup.Id(receiver).Dot(fieldName).Op("=").Id("visitResult")
 			return
 		}
-		// Otherwise do type assertion
 		ifGroup.If(
-			jen.List(jen.Id("newVal"), jen.Id("ok")).Op(":=").
-				Id("visitResult").Assert(fieldTypeNode),
+			jen.List(jen.Id("newVal"), jen.Id("ok")).Op(":=").Id("visitResult").Assert(fieldTypeNode),
 			jen.Id("ok"),
 		).Block(
 			jen.Id(receiver).Dot(fieldName).Op("=").Id("newVal"),
+			jen.Return(jen.Nil()),
 		)
+
+		ifGroup.Return(jen.Qual("fmt", "Errorf").Call(
+			jen.Lit("type assertion failed for field %s: expected %s, got %T"),
+			jen.Id("key"),
+			jen.Lit(fieldTypeStr),
+			jen.Id("visitResult"),
+		))
 	})
 }
 
