@@ -3,9 +3,8 @@
 `atgen` 是一个为结构体生成读写访问方法的 Go 代码生成工具。
 
 ## 功能
-- 为带有 `//go:generate` 标记的结构体生成以下方法：
-  - `func (t* Obj) ReadAt(key string) (val any, ok bool)` - 用于通过 key 读取字段值
-  - `func (t* Obj) WriteAt(key string, value any) (ok bool)` - 用于通过 key 写入字段值
+- 为带有 `//go:generate atgen -key=json -type=Obj -output=obj_at.gen.go` 标记的结构体生成方法：
+  - `func (t* Obj) At(key string, visit func(val any) any)`
 - 支持通过字段名或标签映射访问字段
 - 正确处理嵌套结构体和匿名字段
 - 自动处理指针类型，支持基础类型到指针类型的自动转换
